@@ -11,6 +11,7 @@
 #include "hardware/irq.h"
 #include "hardware/adc.h"
 #include "hardware/gpio.h"
+#include "hardware/watchdog.h"
 
 // Master control 
 bool runMotor = true;
@@ -79,15 +80,15 @@ uint hallCounter = 0;
 uint currentHall = 0;
 
 // Control variables
-const uint16_t SAFE_TIME_TO_INIT = 1500;     // Safe time to stabilize
-const uint16_t LIMIT_CURRENT      = 29000;   // Limit current in mA
+const uint16_t SAFE_TIME_TO_INIT = 5000;     // Safe time to stabilize
+const int CURRENT_LIMIT      = 5000;   // Limit current in mA
 const int ADC_HIGH_SCALED_THRESHOLD = 220;   // ADC High threshold
 const int PWM_LOW_THRESHOLD = 35;            // PWM LOW Threshold
 int SCALING_FACTOR_ADC = 0;                  // Scaling factor ADC (for variation 0 - 255)
 int adc_scaled_thresh = 0;                   // Low threshold  ADC
 
 bool safe_to_init = false;                   // Is it stable?
-bool exceeded_current = false;               // Has it exceeded limit current?
+bool exceeded_current_limit = false;         // Has current limit been exceeded?
 
 /**
  * @brief Get the hall sensor state.
@@ -167,10 +168,26 @@ int main(){
     // Setup peripherals
     setup(); 
 
+    // MAIN LOOP
     while (true)
     {
+        // Update the watchdog each cycle
+        watchdog_update();
+
+        // LED
         gpio_put(LED_PIN, !gpio_get(LED_PIN));
+
+        // Control variables
         safe_to_init = to_ms_since_boot(get_absolute_time()) >= SAFE_TIME_TO_INIT;
+
+        // // If overcurrent event occurs reset the board
+        if(current_ma > 5000){ 
+            exceeded_current_limit = true; 
+            watchdog_reboot(0, 0, 0);
+        }
+
+        //printf("Current: %d\n", current_ma);
+
         SCALING_FACTOR_ADC = (ADC_HIGH_SCALED_THRESHOLD - adc_scaled_thresh);
     }
     return 0;
@@ -202,6 +219,9 @@ uint get_halls() {
 void setup() {
 
     stdio_init_all();
+
+    // Enable watchdog with a timer
+    watchdog_enable(800, 1);
 
     //  Initialize Led
     gpio_init(LED_PIN);
@@ -326,7 +346,7 @@ void writePWM(uint halls, int duty, bool synchronous) {
 
 
 void writePhases(uint ah, uint bh, uint ch, uint al, uint bl, uint cl) {
-    if(safe_to_init){
+    if(safe_to_init && !exceeded_current_limit){
         pwm_set_both_levels(A_PWM_SLICE, ah, 255 - al);
         pwm_set_both_levels(B_PWM_SLICE, bh, 255 - bl);
         pwm_set_both_levels(C_PWM_SLICE, ch, 255 - cl);
@@ -350,9 +370,7 @@ void on_pwm_wrap() {
 
 
 void on_adc_fifo() {
-
     adc_run(false);     // Stops sampling on adc interruption
-    gpio_put(FLAG_PIN_ADC, 1);
     
     // Read adcs from fifo
     adc_isense = adc_fifo_get();
@@ -365,14 +383,12 @@ void on_adc_fifo() {
     int throttle = read_throttle();
 
     // Map analog input values
-    current_ma = (4095 - adc_isense - 2047.5 ) * (30 / 2047.5) * 1000;   // Current in miliAmps
-    current_target_ma = throttle * FULL_SCALE_CURRENT_MA / 256;
+    current_ma = (2047 - adc_isense ) * 14;   // Current in miliAmps
+
+    // current_target_ma = throttle * FULL_SCALE_CURRENT_MA / 256;
     voltage_mv = adc_vsense * VOLTAGE_SCALING;
     
     writePWM(get_halls(), throttle, true);
-
-    gpio_put(FLAG_PIN_ADC, 0);
-
 }
 
 
