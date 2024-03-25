@@ -26,12 +26,12 @@ bool isMoving = false;
 const uint LED_PIN = 25;
 
 // Pin definitions
-const uint AH_PIN = 16;     //PWM Slice 0A
-const uint AL_PIN = 17;     //PWM Slice 0B
-const uint BH_PIN = 18;     //PWM Slice 1A
-const uint BL_PIN = 19;     //PWM Slice 1B
-const uint CH_PIN = 20;     //PWM Slice 2A
-const uint CL_PIN = 21;     //PWM Slice 0A
+const uint AH_PIN = 16;     // PWM Slice 0A
+const uint AL_PIN = 17;     // PWM Slice 0B
+const uint BH_PIN = 18;     // PWM Slice 1A
+const uint BL_PIN = 19;     // PWM Slice 1B
+const uint CH_PIN = 20;     // PWM Slice 2A
+const uint CL_PIN = 21;     // PWM Slice 0A
 
 // Hall sensor pins
 const uint HALL_1_PIN = 13;
@@ -81,11 +81,13 @@ uint currentHall = 0;
 
 // Control variables
 const uint16_t SAFE_TIME_TO_INIT = 5000;     // Safe time to stabilize
-const int CURRENT_LIMIT      = 5000;   // Limit current in mA
+const int CURRENT_LIMIT      = 5000;         // Limit current in mA
 const int ADC_HIGH_SCALED_THRESHOLD = 220;   // ADC High threshold
 const int PWM_LOW_THRESHOLD = 35;            // PWM LOW Threshold
 int SCALING_FACTOR_ADC = 0;                  // Scaling factor ADC (for variation 0 - 255)
 int adc_scaled_thresh = 0;                   // Low threshold  ADC
+int prev_duty = 0;                           // Previous duty cycle    
+int isense_bias = 0;                         // Bias (threshold) for current sensor 
 
 bool safe_to_init = false;                   // Is it stable?
 bool exceeded_current_limit = false;         // Has current limit been exceeded?
@@ -181,12 +183,16 @@ int main(){
         safe_to_init = to_ms_since_boot(get_absolute_time()) >= SAFE_TIME_TO_INIT;
 
         // // If overcurrent event occurs reset the board
-        if(current_ma > 5000){ 
-            exceeded_current_limit = true; 
-            watchdog_reboot(0, 0, 0);
+        if(current_ma > 5){ 
+            safe_to_init = false;
+            sleep_us(250);
+            if(current_ma > 5){
+                exceeded_current_limit = true; 
+                watchdog_reboot(0, 0, 0);   // DO NOT put a delay in the watchdog, it must operate instantly, if not the code crashes
+            }
         }
 
-        //printf("Current: %d\n", current_ma);
+        // printf("Current: %d\n", current_ma);
 
         SCALING_FACTOR_ADC = (ADC_HIGH_SCALED_THRESHOLD - adc_scaled_thresh);
     }
@@ -221,7 +227,7 @@ void setup() {
     stdio_init_all();
 
     // Enable watchdog with a timer
-    watchdog_enable(800, 1);
+    watchdog_enable(900, 1);
 
     //  Initialize Led
     gpio_init(LED_PIN);
@@ -246,8 +252,7 @@ void setup() {
     gpio_set_function(AH_PIN, GPIO_FUNC_PWM);
     gpio_set_function(AL_PIN, GPIO_FUNC_PWM);
     gpio_set_function(BH_PIN, GPIO_FUNC_PWM);
-    gpio_set_function(BL_PIN,
-     GPIO_FUNC_PWM);
+    gpio_set_function(BL_PIN, GPIO_FUNC_PWM);
     gpio_set_function(CH_PIN, GPIO_FUNC_PWM);
     gpio_set_function(CL_PIN, GPIO_FUNC_PWM);
 
@@ -285,11 +290,12 @@ void setup() {
     irq_set_enabled(ADC_IRQ_FIFO, true);
 
     //  Adjust isense
-    sleep_ms(500);
-    for(uint i = 0; i < 100; i++) 
+    sleep_ms(200);
+    for(uint i = 0; i < 127; i++) {
         adc_bias += adc_isense;   //Bias es el error cuando no hay corriente circulando por el motor 
-        sleep_ms(10);
-    adc_bias /= 100;
+        sleep_ms(5);
+    }
+    adc_bias /= 128;     // Calculate average value of 128 samplings
 }
 
 void identify_halls()
@@ -316,9 +322,19 @@ void writePWM(uint halls, int duty, bool synchronous) {
     duty = (duty < 0)? 0 : duty;
     duty = (duty > 255)? 255 : duty;
 
+    // Update duty gradually
+    if(duty > prev_duty){
+        duty = prev_duty + DUTY_CYCLE_STEP;
+    }else if(duty < prev_duty){
+        duty = prev_duty - DUTY_CYCLE_STEP;
+    }
+
+    // Update previous duty
+    prev_duty = duty;
+
     uint complement = 0;
     if(synchronous)
-        complement = 255 - duty - 6;
+        complement = 255 - duty - 6;   // -6 to avoid overlapping pwms causing a short
 
     switch(halls){
         case 1: // Case 001
@@ -383,7 +399,10 @@ void on_adc_fifo() {
     int throttle = read_throttle();
 
     // Map analog input values
-    current_ma = (2047 - adc_isense ) * 14;   // Current in miliAmps
+    adc_isense = (adc_isense - adc_bias) / (4095 - adc_bias);
+    current_ma = (165 * adc_isense / 10);   // Current in miliAmps
+
+    current_ma = (current_ma < 0)? 0 : current_ma;
 
     // current_target_ma = throttle * FULL_SCALE_CURRENT_MA / 256;
     voltage_mv = adc_vsense * VOLTAGE_SCALING;
@@ -398,19 +417,8 @@ int read_throttle()
         adc_scaled_thresh = (adc_scaled_thresh == 0)? (adc_throttle >> 4): adc_scaled_thresh;
         adc_scaled_thresh = (adc_scaled_thresh > 170)? 170 : adc_scaled_thresh;
         int adc = adc_throttle >> 4;                                     // Bound ADC reading to 0 - 255
-        return ((adc - adc_scaled_thresh) << 8) / (SCALING_FACTOR_ADC);  // Adjust adc reading to thresholds
+        adc = ((adc - adc_scaled_thresh) << 8) / (SCALING_FACTOR_ADC);  // Adjust adc reading to thresholds
+        return (adc < 0)? 0 : adc;
     }
     return 0;
-}
-
-
-
-void adjustDuty(){
-    if(duty_cycle > target_duty_cycle){
-        duty_cycle -= DUTY_CYCLE_STEP;
-    }
-    if(duty_cycle < target_duty_cycle){
-        duty_cycle += DUTY_CYCLE_STEP;
-    }
-    sleep_ms(2);
 }
