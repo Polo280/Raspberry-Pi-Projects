@@ -82,12 +82,14 @@ uint currentHall = 0;
 // Control variables
 const uint16_t SAFE_TIME_TO_INIT = 5000;     // Safe time to stabilize
 const int CURRENT_LIMIT      = 5000;         // Limit current in mA
-const int ADC_HIGH_SCALED_THRESHOLD = 220;   // ADC High threshold
+const int ADC_HIGH_SCALED_THRESHOLD = 166;   // ADC High threshold (throttle)
 const int PWM_LOW_THRESHOLD = 35;            // PWM LOW Threshold
 int SCALING_FACTOR_ADC = 0;                  // Scaling factor ADC (for variation 0 - 255)
 int adc_scaled_thresh = 0;                   // Low threshold  ADC
 int prev_duty = 0;                           // Previous duty cycle    
 int isense_bias = 0;                         // Bias (threshold) for current sensor 
+
+int debugThrottle = 0;
 
 bool safe_to_init = false;                   // Is it stable?
 bool exceeded_current_limit = false;         // Has current limit been exceeded?
@@ -183,16 +185,16 @@ int main(){
         safe_to_init = to_ms_since_boot(get_absolute_time()) >= SAFE_TIME_TO_INIT;
 
         // // If overcurrent event occurs reset the board
-        if(current_ma > 5){ 
-            safe_to_init = false;
-            sleep_us(250);
-            if(current_ma > 5){
-                exceeded_current_limit = true; 
-                watchdog_reboot(0, 0, 0);   // DO NOT put a delay in the watchdog, it must operate instantly, if not the code crashes
-            }
-        }
+        // if(current_ma > 5){ 
+        //     safe_to_init = false;
+        //     sleep_us(250);
+        //     if(current_ma > 5){
+        //         exceeded_current_limit = true; 
+        //         watchdog_reboot(0, 0, 0);   // DO NOT put a delay in the watchdog, it must operate instantly, if not the code crashes
+        //     }
+        // }
 
-        // printf("Current: %d\n", current_ma);
+        // printf("Current: %d\n", debugThrottle);
 
         SCALING_FACTOR_ADC = (ADC_HIGH_SCALED_THRESHOLD - adc_scaled_thresh);
     }
@@ -392,11 +394,13 @@ void on_adc_fifo() {
     adc_isense = adc_fifo_get();
     adc_vsense = adc_fifo_get();
     adc_throttle = adc_fifo_get();
+    debugThrottle = adc_throttle;
 
     uint hall = get_halls();          // 200 nanoseconds, read from hall states and store values in uint variable (which ranges from 1-6)
     
     // Get duty cycle
     int throttle = read_throttle();
+    // debugThrottle = throttle;
 
     // Map analog input values
     adc_isense = (adc_isense - adc_bias) / (4095 - adc_bias);
@@ -415,7 +419,7 @@ int read_throttle()
 {
     if(safe_to_init){   // If system is already stable
         adc_scaled_thresh = (adc_scaled_thresh == 0)? (adc_throttle >> 4): adc_scaled_thresh;
-        adc_scaled_thresh = (adc_scaled_thresh > 170)? 170 : adc_scaled_thresh;
+        adc_scaled_thresh = (adc_scaled_thresh > 170)? 170 : adc_scaled_thresh;  // Bound high limit threshold
         int adc = adc_throttle >> 4;                                     // Bound ADC reading to 0 - 255
         adc = ((adc - adc_scaled_thresh) << 8) / (SCALING_FACTOR_ADC);  // Adjust adc reading to thresholds
         return (adc < 0)? 0 : adc;
